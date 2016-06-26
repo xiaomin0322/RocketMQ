@@ -476,35 +476,46 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             final CommunicationMode communicationMode,//
             final SendCallback sendCallback, final long timeout//
     ) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
-        this.makeSureStateOK();
-        Validators.checkMessage(msg, this.defaultMQProducer);
+        this.makeSureStateOK();//检查服务状态
+        Validators.checkMessage(msg, this.defaultMQProducer);//检查消息合法性
 
+        //发送超时时间。
         final long maxTimeout = this.defaultMQProducer.getSendMsgTimeout() + 1000;
+        ////发送开始时间。
         final long beginTimestamp = System.currentTimeMillis();
         long endTimestamp = beginTimestamp;
+        ////获得topic对应的发布信息。
         TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(msg.getTopic());
         if (topicPublishInfo != null && topicPublishInfo.ok()) {
             MessageQueue mq = null;
             Exception exception = null;
             SendResult sendResult = null;
+            ////重试次数，重试几次避免网络引起的不可用。
             int timesTotal = 1 + this.defaultMQProducer.getRetryTimesWhenSendFailed();
             int times = 0;
             String[] brokersSent = new String[timesTotal];
+            ////尝试发送设置的次数，若已经超时了则不再发送。
             for (; times < timesTotal && (endTimestamp - beginTimestamp) < maxTimeout; times++) {
-                String lastBrokerName = null == mq ? null : mq.getBrokerName();
+            	//上次尝试发送使用的broker。
+            	String lastBrokerName = null == mq ? null : mq.getBrokerName();
+            	//选择一个borker，一般会避免使用上次尝试过的broker。
                 MessageQueue tmpmq = topicPublishInfo.selectOneMessageQueue(lastBrokerName);
                 if (tmpmq != null) {
                     mq = tmpmq;
+                    //记录发送过的broker列表。
                     brokersSent[times] = mq.getBrokerName();
                     try {
+                    	//调用该方法真正发送。
                         sendResult = this.sendKernelImpl(msg, mq, communicationMode, sendCallback, timeout);
+                      //记录发送耗时
                         endTimestamp = System.currentTimeMillis();
+                      //根据通讯模式来针对发送结果做处理。
                         switch (communicationMode) {
                         case ASYNC:
-                            return null;
+                            return null;//异步发送立即返回。
                         case ONEWAY:
-                            return null;
-                        case SYNC:
+                            return null;//单向通讯也立即返回。
+                        case SYNC://同步发送则如果未成功则重试，否则直接返回发送结果。
                             if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
                                 if (this.defaultMQProducer.isRetryAnotherBrokerWhenNotStoreOK()) {
                                     continue;
@@ -545,7 +556,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                             continue;
                         default:
                             if (sendResult != null) {
-                                return sendResult;
+                                return sendResult; //返回发送结果。
                             }
 
                             throw e;
@@ -563,7 +574,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             } // end of for
 
             if (sendResult != null) {
-                return sendResult;
+                return sendResult; //返回发送结果。
             }
 
             String info =
@@ -571,19 +582,20 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                         times, //
                         (System.currentTimeMillis() - beginTimestamp), //
                         msg.getTopic(),//
-                        Arrays.toString(brokersSent));
+                        Arrays.toString(brokersSent));//构造错误信息。
 
             info += FAQUrl.suggestTodo(FAQUrl.SEND_MSG_FAILED);
-
+          //发送失败抛出异常，则发送应用要做好相应的业务处理。
             throw new MQClientException(info, exception);
         }
 
         List<String> nsList = this.getmQClientFactory().getMQClientAPIImpl().getNameServerAddressList();
         if (null == nsList || nsList.isEmpty()) {
+        	//获得队注册服务器失败异常。
             throw new MQClientException("No name server address, please set it."
                     + FAQUrl.suggestTodo(FAQUrl.NAME_SERVER_ADDR_NOT_EXIST_URL), null);
         }
-
+       //没有对应的路由信息异常
         throw new MQClientException("No route info of this topic, " + msg.getTopic()
                 + FAQUrl.suggestTodo(FAQUrl.NO_TOPIC_ROUTE_INFO), null);
     }
@@ -613,21 +625,26 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             final SendCallback sendCallback,//
             final long timeout) throws MQClientException, RemotingException, MQBrokerException,
             InterruptedException {
+    	//获得broker服务器的地址。
         String brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(mq.getBrokerName());
         if (null == brokerAddr) {
+        	//如果地址为空，则再更新一次，。
             tryToFindTopicPublishInfo(mq.getTopic());
             brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(mq.getBrokerName());
         }
 
         SendMessageContext context = null;
+      //地址不为空，则继续发送消息。
         if (brokerAddr != null) {
             byte[] prevBody = msg.getBody();
             try {
                 int sysFlag = 0;
+              //根据压缩配置执行消息压缩。
                 if (this.tryToCompressMessage(msg)) {
+                	//压缩标记会记录在消息附件信息中，接收到消息根据标记解压
                     sysFlag |= MessageSysFlag.CompressedFlag;
                 }
-
+              //事务标志。
                 final String tranMsg = msg.getProperty(MessageConst.PROPERTY_TRANSACTION_PREPARED);
                 if (tranMsg != null && Boolean.parseBoolean(tranMsg)) {
                     sysFlag |= MessageSysFlag.TransactionPreparedType;
@@ -655,7 +672,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                     context.setMq(mq);
                     this.executeSendMessageHookBefore(context);
                 }
-
+                //组装发送消息的请求头。
                 SendMessageRequestHeader requestHeader = new SendMessageRequestHeader();
                 requestHeader.setProducerGroup(this.defaultMQProducer.getProducerGroup());
                 requestHeader.setTopic(msg.getTopic());
@@ -675,7 +692,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                         MessageAccessor.clearProperty(msg, MessageConst.PROPERTY_RECONSUME_TIME);
                     }
                 }
-
+              //调用客户端api发送消息。
                 SendResult sendResult = this.mQClientFactory.getMQClientAPIImpl().sendMessage(//
                     brokerAddr,// 1
                     mq.getBrokerName(),// 2
